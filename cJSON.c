@@ -748,7 +748,6 @@ static unsigned char utf16_literal_to_utf8(const unsigned char * const input_poi
             goto fail;
         }
 
-
         /* calculate the unicode codepoint from the surrogate pair */
         codepoint = 0x10000 + (((first_code & 0x3FF) << 10) | (second_code & 0x3FF));
     }
@@ -1081,9 +1080,11 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
 static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_buffer);
 static cJSON_bool print_object(const cJSON * const item, printbuffer * const output_buffer);
 
-/* Utility to jump whitespace and cr/lf */
-static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
+/* Utility to jump whitespace and cr/lf and comments */
+static parse_buffer *buffer_skip_whitespace_and_comments(parse_buffer * const buffer)
 {
+    const unsigned char* comment_end;
+
     if ((buffer == NULL) || (buffer->content == NULL))
     {
         return NULL;
@@ -1097,6 +1098,33 @@ static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
     while (can_access_at_index(buffer, 0) && (buffer_at_offset(buffer)[0] <= 32))
     {
        buffer->offset++;
+    }
+
+    /* skip single-line comments */
+    if (can_read(buffer, 2) && (strncmp((const char*)buffer_at_offset(buffer), "//", 2) == 0))
+    {
+        comment_end = memchr(buffer_at_offset(buffer), '\n', buffer->length - buffer->offset);
+        if (comment_end == NULL)
+        {
+            /* no new line, everything is commented out */
+            buffer->offset = buffer->length;
+        }
+        else
+        {
+            buffer->offset += comment_end - buffer_at_offset(buffer);
+            buffer_skip_whitespace_and_comments(buffer);
+        }
+    }
+    /* skip multi-line comments */
+    else if (can_read(buffer, 2) && (strncmp((const char*)buffer_at_offset(buffer), "/*", 2) == 0))
+    {
+        comment_end = memmem(buffer_at_offset(buffer), buffer->length - buffer->offset, "*/", 2);
+        if (comment_end != NULL)
+        {
+            printf("skipping multi-line comment: %.*s\n", (int)(comment_end + 2 - buffer_at_offset(buffer)), buffer_at_offset(buffer));
+            buffer->offset += (comment_end + 2) - buffer_at_offset(buffer);
+            buffer_skip_whitespace_and_comments(buffer);
+        }
     }
 
     if (buffer->offset == buffer->length)
@@ -1164,7 +1192,7 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
         goto fail;
     }
 
-    if (!parse_value(item, buffer_skip_whitespace(skip_utf8_bom(&buffer))))
+    if (!parse_value(item, buffer_skip_whitespace_and_comments(skip_utf8_bom(&buffer))))
     {
         /* parse failure. ep is set. */
         goto fail;
@@ -1173,7 +1201,7 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
     /* if we require null-terminated JSON without appended garbage, skip and then check for a null terminator */
     if (require_null_terminated)
     {
-        buffer_skip_whitespace(&buffer);
+        buffer_skip_whitespace_and_comments(&buffer);
         if ((buffer.offset >= buffer.length) || buffer_at_offset(&buffer)[0] != '\0')
         {
             goto fail;
@@ -1507,7 +1535,7 @@ static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buf
     }
 
     input_buffer->offset++;
-    buffer_skip_whitespace(input_buffer);
+    buffer_skip_whitespace_and_comments(input_buffer);
     if (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ']'))
     {
         /* empty array */
@@ -1549,12 +1577,12 @@ static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buf
 
         /* parse next value */
         input_buffer->offset++;
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace_and_comments(input_buffer);
         if (!parse_value(current_item, input_buffer))
         {
             goto fail; /* failed to parse value */
         }
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace_and_comments(input_buffer);
     }
     while (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ','));
 
@@ -1666,7 +1694,7 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
     }
 
     input_buffer->offset++;
-    buffer_skip_whitespace(input_buffer);
+    buffer_skip_whitespace_and_comments(input_buffer);
     if (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == '}'))
     {
         goto success; /* empty object */
@@ -1712,12 +1740,12 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
 
         /* parse the name of the child */
         input_buffer->offset++;
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace_and_comments(input_buffer);
         if (!parse_string(current_item, input_buffer))
         {
             goto fail; /* failed to parse name */
         }
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace_and_comments(input_buffer);
 
         /* swap valuestring and string, because we parsed the name */
         current_item->string = current_item->valuestring;
@@ -1730,12 +1758,12 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
 
         /* parse the value */
         input_buffer->offset++;
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace_and_comments(input_buffer);
         if (!parse_value(current_item, input_buffer))
         {
             goto fail; /* failed to parse value */
         }
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace_and_comments(input_buffer);
     }
     while (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ','));
 
@@ -2062,7 +2090,6 @@ static void* cast_away_const(const void* string)
 #if defined(__clang__) || (defined(__GNUC__)  && ((__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ > 5))))
     #pragma GCC diagnostic pop
 #endif
-
 
 static cJSON_bool add_item_to_object(cJSON * const object, const char * const string, cJSON * const item, const internal_hooks * const hooks, const cJSON_bool constant_key)
 {
@@ -2889,7 +2916,6 @@ static void minify_string(char **input, char **output) {
     *input += static_strlen("\"");
     *output += static_strlen("\"");
 
-
     for (; (*input)[0] != '\0'; (void)++(*input), ++(*output)) {
         (*output)[0] = (*input)[0];
 
@@ -2983,7 +3009,6 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsTrue(const cJSON * const item)
 
     return (item->type & 0xff) == cJSON_True;
 }
-
 
 CJSON_PUBLIC(cJSON_bool) cJSON_IsBool(const cJSON * const item)
 {
